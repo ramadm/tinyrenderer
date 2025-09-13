@@ -1,7 +1,6 @@
 #include <cmath>
 #include "tgaimage.h"
-#include <iostream>
-#include <array>
+#include "model.h"
 
 constexpr TGAColor white   = {255, 255, 255, 255}; // attention, BGRA order
 constexpr TGAColor green   = {  0, 255,   0, 255};
@@ -53,83 +52,33 @@ void draw_polygon(std::vector<Point2D> points, TGAImage &framebuffer, TGAColor c
     draw_line(end.x, end.y, start.x, start.y, framebuffer, color);
 }
 
-class WavefrontObj {
-private:
-    std::vector<std::array<float, 3>> verts;
-    std::vector<std::vector<int>> faces;
+// for now this method works by flattening the image on the z-axis
+void render_model(Model model, TGAImage &framebuffer) {
+    const int width = framebuffer.width();
+    const int height = framebuffer.height();
 
-public:
+    auto verts = model.get_verts();
+    auto faces = model.get_faces();
 
-    WavefrontObj(std::string filename) {
-        std::ifstream inputFile(filename);
-        if (!inputFile.is_open()) {
-            std::cerr << "Failed to open file: " << filename;
-            return;
-        }
-
-        std::string line;
-        while(std::getline(inputFile, line)) {
-            // parse the line by spaces
-            std::string delim = " ";
-            std::vector<std::string> tokens;
-            size_t pos = 0;
-            std::string token;
-            while ((pos = line.find(delim)) != std::string::npos) {
-                token = line.substr(0, pos);
-                tokens.push_back(token);
-                line.erase(0, pos + delim.length());
-            }
-            tokens.push_back(line);
-
-            // vertices
-            if (tokens[0] == "v") {
-                std::array<float, 3> triple;
-                for (size_t i = 0; i < 3; i++) {
-                    triple[i] = std::stof(tokens[i+1]);
-                }
-                verts.push_back(triple);
-            }
-
-            // faces
-            if (tokens[0] == "f") {
-                std::vector<int> polygon;
-                for (size_t i = 1; i < tokens.size(); i++) {
-                    // first number before / is the index of a coord in the verts array
-                    std::string s = tokens[i];
-                    int ind = std::stoi(s.substr(0, s.find("/"))) - 1; // decremented because wavefront file format uses 1-indexing.
-                    polygon.push_back(ind);
-                }
-                faces.push_back(polygon);
-            }
-        }
+    std::vector<Point2D> realVerts;
+    for (size_t i = 0; i < verts.size(); i++) {
+        Point2D vert;
+        vert.x = width / 2 + verts[i][0] * width / 2;
+        vert.y = height / 2 + verts[i][1] * height / 2;
+        framebuffer.set(vert.x, vert.y, white);
+        realVerts.push_back(vert);
     }
 
-    // for now this method works by flattening the image on the z-axis
-    void render(TGAImage &framebuffer) {
-        const int width = framebuffer.width();
-        const int height = framebuffer.height();
-
-        std::vector<Point2D> realVerts;
-        for (size_t i = 0; i < verts.size(); i++) {
-            Point2D vert;
-            vert.x = width / 2 + verts[i][0] * width / 2;
-            vert.y = height / 2 + verts[i][1] * height / 2;
-            framebuffer.set(vert.x, vert.y, white);
-            realVerts.push_back(vert);
+    for (size_t i = 0; i < faces.size(); i++) {
+        std::vector<int> face = faces[i];
+        std::vector<Point2D> polygon;
+        for (size_t j = 0; j < face.size(); j++) {
+            int ind = face[j];
+            polygon.push_back(realVerts[ind]);
         }
-
-        for (size_t i = 0; i < faces.size(); i++) {
-            std::vector<int> face = faces[i];
-            std::vector<Point2D> polygon;
-            for (size_t j = 0; j < face.size(); j++) {
-                int ind = face[j];
-                polygon.push_back(realVerts[ind]);
-            }
-            draw_polygon(polygon, framebuffer, red);
-        }
+        draw_polygon(polygon, framebuffer, red);
     }
-
-};
+}
 
 int main(int argc, char** argv) {
     constexpr int width  = 1024;
@@ -138,8 +87,8 @@ int main(int argc, char** argv) {
 
     // load the diablo image file
     std::string filename = "obj/diablo3_pose/diablo3_pose.obj";
-    WavefrontObj model(filename);
-    model.render(framebuffer);
+    Model model(filename);
+    render_model(model, framebuffer);
 
     framebuffer.write_tga_file("framebuffer.tga");
     return 0;
