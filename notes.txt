@@ -1,1 +1,1 @@
-g++ -o tinyrenderer main.cpp tgaimage.cpp
+g++ -o tinyrenderer main.cpp tgaimage.cpp model.cpp geometry.h our_gl.cpp

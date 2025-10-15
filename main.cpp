@@ -1,94 +1,104 @@
-#include <cmath>
-#include "tgaimage.h"
+#include <cstdlib>
+#include "our_gl.h"
 #include "model.h"
 
-constexpr TGAColor white   = {255, 255, 255, 255}; // attention, BGRA order
-constexpr TGAColor green   = {  0, 255,   0, 255};
-constexpr TGAColor red     = {  0,   0, 255, 255};
-constexpr TGAColor blue    = {255, 128,  64, 255};
-constexpr TGAColor yellow  = {  0, 200, 255, 255};
+extern mat<4,4> ModelView, Perspective; // "OpenGL" state matrices and
+extern std::vector<double> zbuffer;     // the depth buffer
 
+struct RandomShader : IShader {
+    const Model &model;
+    TGAColor color = {};
+    vec3 tri[3];  // triangle in eye coordinates
 
-void draw_line(int ax, int ay, int bx, int by, TGAImage &framebuffer, TGAColor color) {
-    bool steep = std::abs(ax-bx) < std::abs(ay-by);
-    if (steep) { // if the line is steep, we transpose the image
-        std::swap(ax, ay);
-        std::swap(bx, by);
-    }
-    if (ax>bx) { // make it left−to−right
-        std::swap(ax, bx);
-        std::swap(ay, by);
+    RandomShader(const Model &m) : model(m) {
     }
 
-    int y = ay;
-    int ierror = 0;
-    
-    for (int x=ax; x<=bx; x++) {
-        if (steep) // if transposed, de−transpose
-            framebuffer.set(y, x, color);
-        else
-            framebuffer.set(x, y, color);
-        ierror += 2 * std::abs(by-ay);
-        if (ierror > bx - ax) {
-            y += by > ay ? 1 : -1;
-            ierror -= 2 * (bx-ax);
-        }
+    virtual vec4 vertex(const int face, const int vert) {
+        vec3 v = model.vert(face, vert);                          // current vertex in object coordinates
+        vec4 gl_Position = ModelView * vec4{v.x, v.y, v.z, 1.};
+        tri[vert] = gl_Position.xyz();                            // in eye coordinates
+        return Perspective * gl_Position;                         // in clip coordinates
     }
-}
 
-struct Point2D {
-    int x;
-    int y;
+    virtual std::pair<bool,TGAColor> fragment(const vec3 bar) const {
+        return {false, color};                                    // do not discard the pixel
+    }
 };
 
-void draw_polygon(std::vector<Point2D> points, TGAImage &framebuffer, TGAColor color) {
-    for (size_t i = 0; i+1 < points.size(); i++) {
-        Point2D point1 = points[i];
-        Point2D point2 = points[i+1];
-        draw_line(point1.x, point1.y, point2.x, point2.y, framebuffer, color);
-    }
-    Point2D end = points[points.size() - 1];
-    Point2D start = points[0];
-    draw_line(end.x, end.y, start.x, start.y, framebuffer, color);
-}
+struct PhongShader: IShader {
+    const Model &model;
+    vec3 l; // light direction
+    vec3 tri[3];  // triangle in eye coordinates
+    vec3 norms[3]; // vertex normals (in eye coords?)
+    vec2 uv_tri[3]; // uv-mapped coordinates of this triangle
 
-// for now this method works by flattening the image on the z-axis
-void render_model(Model model, TGAImage &framebuffer) {
-    const int width = framebuffer.width();
-    const int height = framebuffer.height();
-
-    auto verts = model.get_verts();
-    auto faces = model.get_faces();
-
-    std::vector<Point2D> realVerts;
-    for (size_t i = 0; i < verts.size(); i++) {
-        Point2D vert;
-        vert.x = width / 2 + verts[i][0] * width / 2;
-        vert.y = height / 2 + verts[i][1] * height / 2;
-        framebuffer.set(vert.x, vert.y, white);
-        realVerts.push_back(vert);
+    PhongShader(const Model &m, const vec3 light) : model(m), l(light) {
+        l = normalized((ModelView*vec4{light.x, light.y, light.z, 0.}).xyz()); // transform the light vector to view coordinates
     }
 
-    for (size_t i = 0; i < faces.size(); i++) {
-        std::vector<int> face = faces[i];
-        std::vector<Point2D> polygon;
-        for (size_t j = 0; j < face.size(); j++) {
-            int ind = face[j];
-            polygon.push_back(realVerts[ind]);
+    virtual vec4 vertex(const int face, const int vert) {
+        vec3 v = model.vert(face, vert);                          // current vertex in object coordinates
+        vec4 gl_Position = ModelView * vec4{v.x, v.y, v.z, 1.};
+        tri[vert] = gl_Position.xyz();                            // in eye coordinates
+
+        // vec3 v_n = model.vert_normal(face, vert);
+        // vec4 gl_Normal = ModelView * vec4{v_n.x, v_n.y, v_n.z, 1.};
+        // norms[vert] = gl_Normal.xyz(); // TODO: look into issues w/ using ModelView to transform normals
+
+        uv_tri[vert] = model.vert_texture(face, vert); // uv-mapping for this triangle
+
+        return Perspective * gl_Position;                         // in clip coordinates
+    }
+
+    virtual std::pair<bool, TGAColor> fragment(const vec3 bar) const {
+        vec2 uv_point = bar.x * uv_tri[0] + bar.y * uv_tri[1] + bar.z * uv_tri[2];
+
+        vec3 n_pre = model.uv_normal(uv_point.x, uv_point.y);
+        vec3 n = normalized((ModelView.invert_transpose() * vec4{n_pre.x, n_pre.y, n_pre.z, 0.}).xyz());
+
+        vec3 r = normalized((2 * l * n) * n - l);
+
+        double ambient = 0.4;
+        double diffuse = 1. * std::max(0., l * n);
+        double specular = (3. * model.uv_specular(uv_point.x, uv_point.y) / 255.) * pow(std::max(0., r.z), 35);
+
+        TGAColor illumination = model.diffuse_color(uv_point.x, uv_point.y);
+        for (int channel: {0, 1, 2}) {
+            illumination[channel] = std::min(255., illumination[channel] * (ambient + diffuse + specular));
         }
-        draw_polygon(polygon, framebuffer, red);
+        
+        return {false, illumination};
     }
-}
+};
 
 int main(int argc, char** argv) {
-    constexpr int width  = 1024;
-    constexpr int height = 1024;
-    TGAImage framebuffer(width, height, TGAImage::RGB);
+    if (argc < 2) {
+        std::cerr << "Usage: " << argv[0] << " obj/model.obj" << std::endl;
+        return 1;
+    }
 
-    // load the diablo image file
-    std::string filename = "obj/diablo3_pose/diablo3_pose.obj";
-    Model model(filename);
-    render_model(model, framebuffer);
+    constexpr int width  = 800;      // output image size
+    constexpr int height = 800;
+    constexpr vec3    eye{-1, 0, 2}; // camera position
+    constexpr vec3 center{ 0, 0, 0}; // camera direction
+    constexpr vec3     up{ 0, 1, 0}; // camera up vector
+
+    lookat(eye, center, up);                                   // build the ModelView   matrix
+    init_perspective(norm(eye-center));                        // build the Perspective matrix
+    init_viewport(width/16, height/16, width*7/8, height*7/8); // build the Viewport    matrix
+    init_zbuffer(width, height);
+    TGAImage framebuffer(width, height, TGAImage::RGB, {0, 0, 0, 255});
+
+    for (int m=1; m<argc; m++) {                    // iterate through all input objects
+        Model model(argv[m]);                       // load the data
+        PhongShader shader(model, vec3{1, 1, 1});
+        for (int f=0; f<model.nfaces(); f++) {      // iterate through all facets
+            Triangle clip = { shader.vertex(f, 0),  // assemble the primitive
+                              shader.vertex(f, 1),
+                              shader.vertex(f, 2) };
+            rasterize(clip, shader, framebuffer);   // rasterize the primitive
+        }
+    }
 
     framebuffer.write_tga_file("framebuffer.tga");
     return 0;
